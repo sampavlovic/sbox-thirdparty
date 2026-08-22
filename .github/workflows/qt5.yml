@@ -145,17 +145,25 @@ jobs:
 
   build-linux:
     needs: setup
-    runs-on: ubuntu-24.04
-    # Built inside the Steam Runtime 3 (sniper) SDK so the shipped Qt only needs symbols the
-    # runtime has. On a bare ubuntu-24.04 runner it picked up that host's glibc and libstdc++.
-    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768
-    name: linuxsteamrt64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # linuxsteamrt64 builds inside the Steam Runtime 3 (sniper) SDK so the shipped Qt only
+          # needs symbols the runtime has. On a bare runner it picked up the host's glibc.
+          - { os: ubuntu-24.04,     platform: linuxsteamrt64, container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768' }
+          - { os: ubuntu-24.04-arm, platform: linuxsteamrtarm64 }
+          - { os: macos-26, platform: osxarm64 }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    name: ${{ matrix.platform }}
     timeout-minutes: 300
 
     steps:
       # The image runs as root and carries neither sudo nor git-lfs; the Facepunch/qt checkout
       # below is an LFS repo and the dep step calls sudo.
       - name: Prepare Steam Runtime container
+        if: matrix.container != ''
         shell: bash
         run: |
           apt-get update -qq
@@ -166,6 +174,7 @@ jobs:
       # Qt needs the X11/xcb/fontconfig development headers to build the platform plugin.
       # Without them configure silently drops xcb and the result cannot open a window.
       - name: Install build deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y build-essential libgl1-mesa-dev libfontconfig1-dev             libfreetype-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev             libxi-dev libxrender-dev libxcb1-dev libxcb-glx0-dev libxcb-keysyms1-dev             libxcb-image0-dev libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev             libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev             libxcb-render-util0-dev libxcb-util-dev libxcb-xinerama0-dev             libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libdbus-1-dev patchelf
@@ -198,7 +207,7 @@ jobs:
 
       - name: Build
         working-directory: qt/valve
-        run: make -j"$(nproc)"
+        run: make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Install
         working-directory: qt/valve
@@ -221,6 +230,7 @@ jobs:
           done
 
           cp -a "$build"/lib/libQt5*.so* "$out/lib/" 2>/dev/null || true
+          cp -a "$build"/lib/libQt5*.dylib "$out/lib/" 2>/dev/null || true
           cp -a "$build"/lib/libQt5*.a "$out/lib/" 2>/dev/null || true
           for tool in moc rcc uic; do
             [ -f "$build/bin/$tool" ] && cp "$build/bin/$tool" "$out/bin/"
@@ -237,13 +247,16 @@ jobs:
           # and neither is a direct sbox dependency - miss them and the plugin fails to load with
           # "could not load the Qt platform plugin xcb".
           mkdir -p "$out/runtime/qt5_plugins/imageformats" "$out/runtime/qt5_plugins/platforms"
-          for m in Concurrent Core DBus Gui Widgets XcbQpa; do
-            cp -a "$out"/lib/libQt5$m.so* "$out/runtime/"
+          for m in Concurrent Core DBus Gui Widgets XcbQpa PrintSupport; do
+            cp -a "$out"/lib/libQt5$m.so* "$out/runtime/" 2>/dev/null || true
+            cp -a "$out"/lib/libQt5$m*.dylib "$out/runtime/" 2>/dev/null || true
           done
           for p in qgif qjpeg qwbmp; do
             cp -a "$out/plugins/imageformats/lib$p.so" "$out/runtime/qt5_plugins/imageformats/" 2>/dev/null || true
+            cp -a "$out/plugins/imageformats/lib$p.dylib" "$out/runtime/qt5_plugins/imageformats/" 2>/dev/null || true
           done
-          cp -a "$out/plugins/platforms/libqxcb.so" "$out/runtime/qt5_plugins/platforms/"
+          cp -a "$out/plugins/platforms/libqxcb.so" "$out/runtime/qt5_plugins/platforms/" 2>/dev/null || true
+          cp -a "$out/plugins/platforms/libqcocoa.dylib" "$out/runtime/qt5_plugins/platforms/" 2>/dev/null || true
 
           # Qt links its plugins with RUNPATH $ORIGIN/../../lib, for its usual prefix/lib +
           # prefix/plugins/<category> layout. runtime/ is flattened - the Qt libraries sit at its
@@ -254,20 +267,28 @@ jobs:
           # it sits at the root.) This is the same $ORIGIN-relative patchelf that linuxdeployqt and
           # cqtdeployer apply when they bundle Qt.
           for plugin in "$out"/runtime/qt5_plugins/*/*.so; do
-            patchelf --set-rpath '$ORIGIN/../..' "$plugin"
+            [ -f "$plugin" ] && patchelf --set-rpath '$ORIGIN/../..' "$plugin"
+          done
+          for plugin in "$out"/runtime/qt5_plugins/*/*.dylib; do
+            [ -f "$plugin" ] || continue
+            install_name_tool -add_rpath "@loader_path/../.." "$plugin" 2>/dev/null || true
+            install_name_tool -id "@rpath/$(basename "$plugin")" "$plugin"
+          done
+          for lib in "$out"/runtime/libQt5*.dylib; do
+            [ -f "$lib" ] && [ ! -L "$lib" ] && install_name_tool -id "@rpath/$(basename "$lib")" "$lib"
           done
 
           ls "$out/runtime" | grep -q "libQt5Core" || { echo "runtime libQt5Core missing"; exit 1; }
-          ls "$out/runtime" | grep -q "libQt5XcbQpa" || { echo "runtime libQt5XcbQpa missing"; exit 1; }
-          [ -f "$out/runtime/qt5_plugins/platforms/libqxcb.so" ] || { echo "runtime libqxcb.so missing"; exit 1; }
+          ls "$out/runtime/qt5_plugins/platforms" | grep -qE 'qxcb|qcocoa' || { echo "runtime platform plugin missing"; exit 1; }
+          [ "$RUNNER_OS" = macOS ] || ls "$out/runtime" | grep -q "libQt5XcbQpa" || { echo "runtime libQt5XcbQpa missing"; exit 1; }
 
       - name: Package
-        run: tar czf "qt5-${{ needs.setup.outputs.lib_version }}-linuxsteamrt64.tar.gz" -C dist .
+        run: tar czf "qt5-${{ needs.setup.outputs.lib_version }}-${{ matrix.platform }}.tar.gz" -C dist .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: qt5-linuxsteamrt64
-          path: qt5-${{ needs.setup.outputs.lib_version }}-linuxsteamrt64.tar.gz
+          name: qt5-${{ matrix.platform }}
+          path: qt5-${{ needs.setup.outputs.lib_version }}-${{ matrix.platform }}.tar.gz
 
   release:
     needs: [setup, build, build-linux]
