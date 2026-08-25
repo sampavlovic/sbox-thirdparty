@@ -59,11 +59,23 @@ jobs:
       matrix:
         include:
           - { os: windows-latest, platform: win64 }
-          - { os: ubuntu-24.04,   platform: linuxsteamrt64 }
+          - { os: ubuntu-24.04,   platform: linuxsteamrt64, container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768' }
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     name: ${{ matrix.platform }}
 
     steps:
+      # linuxsteamrt64 builds run inside the Steam Runtime 3 (sniper) SDK so their output only
+      # needs symbols the runtime actually has. Building on ubuntu-latest instead is what left
+      # these libraries needing GLIBC_2.38 when sniper provides 2.31. The image carries neither
+      # sudo nor git-lfs, which actions/checkout and the dep steps below expect.
+      - name: Prepare Steam Runtime container
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends sudo git-lfs ca-certificates
+
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-msvc
@@ -73,7 +85,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y cmake ninja-build
 
+      # setup-python resolves its download against the runner's distro and publishes no build
+      # for steamrt, so it is skipped inside the container. sniper ships Python 3.9 as both
+      # python and python3, which is what these build scripts want it for.
       - uses: actions/setup-python@v5
+        if: matrix.container == ''
         with:
           python-version: '3.12'
 

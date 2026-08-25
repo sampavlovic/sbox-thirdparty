@@ -34,13 +34,25 @@ jobs:
       matrix:
         include:
           - { os: windows-latest,   platform: win64 }
-          - { os: ubuntu-24.04,     platform: linuxsteamrt64 }
+          - { os: ubuntu-24.04,     platform: linuxsteamrt64, container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768' }
           - { os: ubuntu-24.04-arm, platform: linuxsteamrtarm64 }
           - { os: macos-26,         platform: osxarm64 }
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     name: ${{ matrix.platform }}
 
     steps:
+      # linuxsteamrt64 builds run inside the Steam Runtime 3 (sniper) SDK so their output only
+      # needs symbols the runtime actually has. Building on ubuntu-latest instead is what left
+      # these libraries needing GLIBC_2.38 when sniper provides 2.31. The image carries neither
+      # sudo nor git-lfs, which actions/checkout and the dep steps below expect.
+      - name: Prepare Steam Runtime container
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends sudo git-lfs ca-certificates
+
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-msvc
@@ -59,7 +71,12 @@ jobs:
 
       - name: Install meson + ninja (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y ninja-build && pip3 install meson
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ninja-build
+          # The sniper SDK already ships meson and has no pip3; only the bare arm64 runner
+          # needs it fetched.
+          command -v meson >/dev/null || { sudo apt-get install -y python3-pip && pip3 install meson; }
 
       - name: Install meson + ninja (macOS)
         if: runner.os == 'macOS'

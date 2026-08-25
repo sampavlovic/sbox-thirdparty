@@ -146,10 +146,21 @@ jobs:
   build-linux:
     needs: setup
     runs-on: ubuntu-24.04
+    # Built inside the Steam Runtime 3 (sniper) SDK so the shipped Qt only needs symbols the
+    # runtime has. On a bare ubuntu-24.04 runner it picked up that host's glibc and libstdc++.
+    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768
     name: linuxsteamrt64
     timeout-minutes: 300
 
     steps:
+      # The image runs as root and carries neither sudo nor git-lfs; the Facepunch/qt checkout
+      # below is an LFS repo and the dep step calls sudo.
+      - name: Prepare Steam Runtime container
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends sudo git-lfs ca-certificates
+
       - uses: actions/checkout@v4
 
       # Qt needs the X11/xcb/fontconfig development headers to build the platform plugin.
@@ -171,10 +182,10 @@ jobs:
 
       # Mirrors valve/fp_config.bat, which is Windows only - same module skips and the
       # same -no-opengl/-no-openssl/-release choices, driven through the Unix configure.
-      # -no-icu is added on top: this runner is ubuntu-24.04, whose system ICU is 74, and
-      # configure would otherwise auto-detect it and leave libQt5Core needing libicu*.so.74
-      # at run time - absent on the Steam Runtime and most other distros. -no-icu makes Qt
-      # use its built-in Unicode tables instead, so the shipped libraries are self-contained.
+      # -no-icu is added on top: configure would otherwise auto-detect whatever ICU the build
+      # image happens to carry and leave libQt5Core needing that libicu*.so at run time, which
+      # is a version gamble on any machine the result lands on. -no-icu makes Qt use its
+      # built-in Unicode tables instead, so the shipped libraries are self-contained.
       - name: Configure
         working-directory: qt/valve
         run: |
