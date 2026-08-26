@@ -74,6 +74,10 @@ jobs:
         run: git clone --depth 1 --branch ${{ needs.setup.outputs.curl_tag }} https://github.com/curl/curl.git src
 
       # ── Linux ──────────────────────────────────────────────────────────────
+      # BROTLI and ZSTD are off explicitly rather than by omission: the Steam Runtime image
+      # carries their headers, so cmake would otherwise detect them and leave libcurl.a needing
+      # libraries this package does not ship. CURL_ZLIB already rules out content decoding, so
+      # these belong with it.
       # Build static libcurl with the OpenSSL backend, but link OpenSSL DYNAMICALLY
       # against the system libssl/libcrypto (provided by the distro / Steam Runtime).
       # We intentionally do NOT bundle static libssl.a/libcrypto.a. Build hosts need
@@ -106,6 +110,8 @@ jobs:
             -DCURL_DISABLE_MQTT=ON \
             -DCURL_DISABLE_FILE=ON \
             -DCURL_ZLIB=OFF \
+            -DCURL_BROTLI=OFF \
+            -DCURL_ZSTD=OFF \
             -DUSE_NGHTTP2=OFF \
             -DUSE_NGTCP2=OFF \
             -DCURL_USE_LIBPSL=OFF \
