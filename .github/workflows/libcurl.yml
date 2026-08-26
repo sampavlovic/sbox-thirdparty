@@ -7,6 +7,10 @@ on:
         description: 'libcurl version with dots (e.g. 8.12.1)'
         required: true
         default: '8.12.1'
+      openssl_version:
+        description: 'OpenSSL release to build the Linux TLS backend against'
+        required: true
+        default: '3.5.8'
   push:
     tags: ['libcurl-*']
 
@@ -16,6 +20,7 @@ jobs:
     outputs:
       lib_version: ${{ steps.ver.outputs.lib_version }}
       curl_tag: ${{ steps.ver.outputs.curl_tag }}
+      openssl_version: ${{ steps.ver.outputs.openssl_version }}
       release_tag: ${{ steps.ver.outputs.release_tag }}
     steps:
       - id: ver
@@ -30,6 +35,8 @@ jobs:
           echo "lib_version=$V"       >> $GITHUB_OUTPUT
           echo "curl_tag=$CURL_TAG"   >> $GITHUB_OUTPUT
           echo "release_tag=libcurl-$V" >> $GITHUB_OUTPUT
+          # A tag push carries no inputs, so fall back to the same default declared above.
+          echo "openssl_version=${{ inputs.openssl_version || '3.5.8' }}" >> $GITHUB_OUTPUT
 
   build:
     needs: setup
@@ -62,9 +69,29 @@ jobs:
       - uses: ./.github/actions/setup-msvc
         if: runner.os == 'Windows'
 
-      - name: Install cmake + ninja + openssl (Linux)
+      - name: Install cmake + ninja (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y cmake ninja-build libssl-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y cmake ninja-build
+
+      # OpenSSL is built here rather than taken from the distro. sniper is Debian 11, so its
+      # OpenSSL is 1.1.1 - end of life upstream and absent from every current distro, which
+      # would stop the engine running anywhere but inside the Steam Runtime container. Building
+      # our own and shipping the archives keeps libengine2.so with no libssl dependency at all.
+      - name: Build OpenSSL ${{ needs.setup.outputs.openssl_version }} (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          V="${{ needs.setup.outputs.openssl_version }}"
+          curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-$V/openssl-$V.tar.gz"
+          mkdir -p ossl && tar xzf openssl.tar.gz -C ossl --strip-components=1
+          cd ossl
+          # -fPIC because these archives end up inside a shared library. Deprecated APIs stay
+          # enabled: curl's NTLM code calls DES_ecb_encrypt and MD4_Init, which OpenSSL 3 keeps
+          # only under those. install_sw skips the man pages, which are most of install's time.
+          ./config no-shared no-tests no-docs \
+            --prefix="$GITHUB_WORKSPACE/ossl-dist" --libdir=lib -fPIC
+          make -j"$(nproc)"
+          make install_sw
 
       - name: Install cmake + ninja (macOS)
         if: runner.os == 'macOS'
@@ -78,15 +105,9 @@ jobs:
       # carries their headers, so cmake would otherwise detect them and leave libcurl.a needing
       # libraries this package does not ship. CURL_ZLIB already rules out content decoding, so
       # these belong with it.
-      # Build static libcurl with the OpenSSL backend, but link OpenSSL DYNAMICALLY
-      # against the system libssl/libcrypto (provided by the distro / Steam Runtime).
-      # We intentionally do NOT bundle static libssl.a/libcrypto.a. Build hosts need
-      # libssl-dev.
-      #
-      # Note for whoever wires libcurl into the Linux side of engine2.build.cs: the old
-      # VPC linked libssl and libcrypto out of src/thirdparty/libcurl/lib/<plat>/ rather
-      # than from the system. Those bundled archives are no longer shipped, so the new
-      # build needs system -lssl -lcrypto instead.
+      # Static libcurl with the OpenSSL backend, linked against the OpenSSL built above and
+      # shipped beside it. engine2.build.cs takes libssl and libcrypto out of
+      # src/thirdparty/libcurl/lib/<plat>/ to match.
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -98,6 +119,8 @@ jobs:
             -DBUILD_TESTING=OFF \
             -DCURL_STATICLIB=ON \
             -DCURL_USE_OPENSSL=ON \
+            -DOPENSSL_ROOT_DIR="$GITHUB_WORKSPACE/ossl-dist" \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCURL_DISABLE_LDAP=ON \
             -DCURL_DISABLE_SMTP=ON \
             -DCURL_DISABLE_IMAP=ON \
@@ -118,6 +141,11 @@ jobs:
             -DUSE_LIBIDN2=OFF
           cmake --build src/build --parallel
           cmake --install src/build
+          # Ship OpenSSL alongside curl - collect-package-upload sweeps dist for *.a, so
+          # landing them here is all it takes. Headers stay out; nothing includes <openssl/*>.
+          cp "$GITHUB_WORKSPACE/ossl-dist/lib/libssl.a" \
+             "$GITHUB_WORKSPACE/ossl-dist/lib/libcrypto.a" \
+             "$GITHUB_WORKSPACE/dist/lib/"
 
       # ── Windows ────────────────────────────────────────────────────────────
       # Build static libcurl backed by Windows Schannel - no extra DLLs needed.
