@@ -55,7 +55,7 @@ jobs:
           - { os: windows-latest, platform: win64 }
           - { os: ubuntu-24.04,   platform: linuxsteamrt64, container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768' }
           - { os: ubuntu-24.04-arm, platform: linuxsteamrtarm64 }
-          - { os: macos-26, platform: osxarm64 }
+          - { os: macos-26,         platform: osxarm64 }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     name: ${{ matrix.platform }}
@@ -82,14 +82,12 @@ jobs:
           git clone https://github.com/GameTechDev/ISPCTextureCompressor src
           git -C src checkout ${{ needs.setup.outputs.lib_version }}
 
-      - name: Install ISPC ${{ needs.setup.outputs.ispc_version }} (Linux)
+      - name: Install ISPC ${{ needs.setup.outputs.ispc_version }} (Unix)
         if: runner.os != 'Windows'
         run: |
           V="${{ needs.setup.outputs.ispc_version }}"
-          a=linux.tar.gz
-          [ "${{ matrix.platform }}" = linuxsteamrtarm64 ] && a=linux.aarch64.tar.gz
-          [ "${{ matrix.platform }}" = osxarm64 ] && a=macOS.arm64.tar.gz
-          curl -fsSL -o ispc.tar.gz "https://github.com/ispc/ispc/releases/download/$V/ispc-$V-$a"
+          case "${{ matrix.platform }}" in osxarm64) a=macOS.arm64;; *arm64) a=linux.aarch64;; *) a=linux;; esac
+          curl -fsSL -o ispc.tar.gz "https://github.com/ispc/ispc/releases/download/$V/ispc-$V-$a.tar.gz"
           mkdir -p ispc && tar xzf ispc.tar.gz -C ispc --strip-components=1
           echo "$GITHUB_WORKSPACE/ispc/bin" >> $GITHUB_PATH
 
@@ -103,15 +101,15 @@ jobs:
           $bin = (Get-ChildItem ispc_dl -Recurse -Filter ispc.exe | Select-Object -First 1).DirectoryName
           Add-Content -Path $env:GITHUB_PATH -Value $bin
 
-      - name: Build (Linux)
+      - name: Build (Unix)
         if: runner.os != 'Windows'
         working-directory: src/ispc_texcomp
         run: |
-          arch=x86-64; tgt=sse2,avx; sse=-msse2
-          extra="kernel_ispc_sse2.o kernel_ispc_avx.o kernel_astc_ispc_sse2.o kernel_astc_ispc_avx.o"
-          so=libispc_texcomp.so; id=
-          [[ "${{ matrix.platform }}" == *arm64 ]] && { arch=aarch64; tgt=neon-i32x4; sse=; extra=; }
-          [ "$RUNNER_OS" = macOS ] && { so=libispc_texcomp.dylib; id="-Wl,-install_name,@rpath/$so"; }
+          # --no-undefined: the per-target objects come from a glob, so make a missing one fail
+          # the link, not the customer's dlopen. macOS ld already errors on undefined symbols.
+          arch=x86-64; tgt=sse2,avx; sse=-msse2; so=libispc_texcomp.so; ld=-Wl,--no-undefined
+          [[ "${{ matrix.platform }}" == *arm64 ]] && { arch=aarch64; tgt=neon-i32x4; sse=; }
+          [ "$RUNNER_OS" = macOS ] && { so=libispc_texcomp.dylib; ld="-Wl,-install_name,@rpath/$so"; }
           for k in kernel kernel_astc; do
             ispc -O2 --arch=$arch --target=$tgt --opt=fast-math --pic \
               -o "${k}_ispc.o" -h "${k}_ispc.h" "${k}.ispc"
@@ -119,8 +117,8 @@ jobs:
           g++ -O2 $sse -fPIC -I. -c ispc_texcomp.cpp -o ispc_texcomp.o
           g++ -O2 $sse -fPIC -I. -c ispc_texcomp_astc.cpp -o ispc_texcomp_astc.o
           mkdir -p "$GITHUB_WORKSPACE/dist/lib" "$GITHUB_WORKSPACE/dist/include"
-          g++ -shared $id -o "$GITHUB_WORKSPACE/dist/lib/$so" \
-            kernel_ispc.o kernel_astc_ispc.o ispc_texcomp.o ispc_texcomp_astc.o $extra
+          g++ -shared $ld -o "$GITHUB_WORKSPACE/dist/lib/$so" \
+            kernel*_ispc*.o ispc_texcomp.o ispc_texcomp_astc.o
           cp ispc_texcomp.h "$GITHUB_WORKSPACE/dist/include/"
 
       # /MD here: ispc_texcomp is consumed as a DLL loaded at runtime, so it owns its own
