@@ -57,7 +57,8 @@ jobs:
         include:
           - { os: windows-latest, platform: win64 }
           - { os: ubuntu-24.04,   platform: linuxsteamrt64, container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:3.0.20260805.254768' }
-          - { os: macos-26,       platform: osxarm64 }
+          - { os: ubuntu-24.04-arm, platform: linuxsteamrtarm64 }
+          - { os: macos-26,         platform: osxarm64 }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     name: ${{ matrix.platform }}
@@ -110,7 +111,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           v="${{ needs.setup.outputs.ispc_version }}"
-          a=linux.tar.gz; [ "$RUNNER_OS" = macOS ] && a=macOS.arm64.tar.gz
+          case "${{ matrix.platform }}" in osxarm64) a=macOS.arm64.tar.gz;; *arm64) a=linux.aarch64.tar.gz;; *) a=linux.tar.gz;; esac
           curl -sSL -o ispc.tar.gz "https://github.com/ispc/ispc/releases/download/$v/ispc-$v-$a"
           mkdir -p ispc_dl && tar -xzf ispc.tar.gz -C ispc_dl
           exe=$(find ispc_dl -type f -name ispc -perm -u+x | head -1)
